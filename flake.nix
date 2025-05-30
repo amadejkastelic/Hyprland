@@ -8,7 +8,7 @@
     systems.url = "github:nix-systems/default-linux";
 
     aquamarine = {
-      url = "github:hyprwm/aquamarine";
+      url = "github:amadejkastelic/aquamarine";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.systems.follows = "systems";
       inputs.hyprutils.follows = "hyprutils";
@@ -77,90 +77,100 @@
     };
   };
 
-  outputs = inputs @ {
-    self,
-    nixpkgs,
-    systems,
-    ...
-  }: let
-    inherit (nixpkgs) lib;
-    eachSystem = lib.genAttrs (import systems);
-    pkgsFor = eachSystem (system:
-      import nixpkgs {
-        localSystem = system;
-        overlays = with self.overlays; [
-          hyprland-packages
-          hyprland-extras
-        ];
-      });
-    pkgsCrossFor = eachSystem (system: crossSystem:
-      import nixpkgs {
-        localSystem = system;
-        inherit crossSystem;
-        overlays = with self.overlays; [
-          hyprland-packages
-          hyprland-extras
-        ];
-      });
-  in {
-    overlays = import ./nix/overlays.nix {inherit self lib inputs;};
+  outputs =
+    inputs@{
+      self,
+      nixpkgs,
+      systems,
+      ...
+    }:
+    let
+      inherit (nixpkgs) lib;
+      eachSystem = lib.genAttrs (import systems);
+      pkgsFor = eachSystem (
+        system:
+        import nixpkgs {
+          localSystem = system;
+          overlays = with self.overlays; [
+            hyprland-packages
+            hyprland-extras
+          ];
+        }
+      );
+      pkgsCrossFor = eachSystem (
+        system: crossSystem:
+        import nixpkgs {
+          localSystem = system;
+          inherit crossSystem;
+          overlays = with self.overlays; [
+            hyprland-packages
+            hyprland-extras
+          ];
+        }
+      );
+    in
+    {
+      overlays = import ./nix/overlays.nix { inherit self lib inputs; };
 
-    checks = eachSystem (system:
-      (lib.filterAttrs
-        (n: _: (lib.hasPrefix "hyprland" n) && !(lib.hasSuffix "debug" n))
-        self.packages.${system})
-      // {
-        inherit (self.packages.${system}) xdg-desktop-portal-hyprland;
-        pre-commit-check = inputs.pre-commit-hooks.lib.${system}.run {
-          src = ./.;
-          hooks = {
-            hyprland-treewide-formatter = {
-              enable = true;
-              entry = "${self.formatter.${system}}/bin/hyprland-treewide-formatter";
-              pass_filenames = false;
-              excludes = ["subprojects"];
-              always_run = true;
+      checks = eachSystem (
+        system:
+        (lib.filterAttrs (
+          n: _: (lib.hasPrefix "hyprland" n) && !(lib.hasSuffix "debug" n)
+        ) self.packages.${system})
+        // {
+          inherit (self.packages.${system}) xdg-desktop-portal-hyprland;
+          pre-commit-check = inputs.pre-commit-hooks.lib.${system}.run {
+            src = ./.;
+            hooks = {
+              hyprland-treewide-formatter = {
+                enable = true;
+                entry = "${self.formatter.${system}}/bin/hyprland-treewide-formatter";
+                pass_filenames = false;
+                excludes = [ "subprojects" ];
+                always_run = true;
+              };
             };
           };
-        };
+        }
+      );
+
+      packages = eachSystem (system: {
+        default = self.packages.${system}.hyprland;
+        inherit (pkgsFor.${system})
+          # hyprland-packages
+          hyprland
+          hyprland-debug
+          hyprland-unwrapped
+          # hyprland-extras
+          xdg-desktop-portal-hyprland
+          ;
+        hyprland-cross = (pkgsCrossFor.${system} "aarch64-linux").hyprland;
       });
 
-    packages = eachSystem (system: {
-      default = self.packages.${system}.hyprland;
-      inherit
-        (pkgsFor.${system})
-        # hyprland-packages
-        hyprland
-        hyprland-debug
-        hyprland-unwrapped
-        # hyprland-extras
-        xdg-desktop-portal-hyprland
-        ;
-      hyprland-cross = (pkgsCrossFor.${system} "aarch64-linux").hyprland;
-    });
+      devShells = eachSystem (system: {
+        default =
+          pkgsFor.${system}.mkShell.override
+            {
+              inherit (self.packages.${system}.default) stdenv;
+            }
+            {
+              name = "hyprland-shell";
+              hardeningDisable = [ "fortify" ];
+              inputsFrom = [ pkgsFor.${system}.hyprland ];
+              packages = [ pkgsFor.${system}.clang-tools ];
+              inherit (self.checks.${system}.pre-commit-check) shellHook;
+            };
+      });
 
-    devShells = eachSystem (system: {
-      default =
-        pkgsFor.${system}.mkShell.override {
-          inherit (self.packages.${system}.default) stdenv;
-        } {
-          name = "hyprland-shell";
-          hardeningDisable = ["fortify"];
-          inputsFrom = [pkgsFor.${system}.hyprland];
-          packages = [pkgsFor.${system}.clang-tools];
-          inherit (self.checks.${system}.pre-commit-check) shellHook;
-        };
-    });
+      formatter = eachSystem (system: pkgsFor.${system}.callPackage ./nix/formatter.nix { });
 
-    formatter = eachSystem (system: pkgsFor.${system}.callPackage ./nix/formatter.nix {});
+      nixosModules.default = import ./nix/module.nix inputs;
+      homeManagerModules.default = import ./nix/hm-module.nix self;
 
-    nixosModules.default = import ./nix/module.nix inputs;
-    homeManagerModules.default = import ./nix/hm-module.nix self;
-
-    # Hydra build jobs
-    # Recent versions of Hydra can aggregate jobsets from 'hydraJobs' intead of a release.nix
-    # or similar. Remember to filter large or incompatible attributes here. More eval jobs can
-    # be added by merging, e.g., self.packages // self.devShells.
-    hydraJobs = self.packages;
-  };
+      # Hydra build jobs
+      # Recent versions of Hydra can aggregate jobsets from 'hydraJobs' intead of a release.nix
+      # or similar. Remember to filter large or incompatible attributes here. More eval jobs can
+      # be added by merging, e.g., self.packages // self.devShells.
+      hydraJobs = self.packages;
+    };
 }
